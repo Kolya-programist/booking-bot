@@ -57,6 +57,13 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                     deleteMessage(chatId, (int) messageId); // удаляем сообщение с командой /start
                     sendStartMenu(chatId);
                 }
+
+                if (text.equals("/admin")) {
+                    long messageId = update.getMessage().getMessageId();
+                    deleteMessage(chatId, (int) messageId); // Удаляем команду
+                    showAdminMenu(chatId);
+                    return; // Выходим, чтобы не показывать главное меню клиента
+                }
             }
             // Обработка нажатия на кнопки
             else if (update.hasCallbackQuery()) {
@@ -94,6 +101,18 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                 else if (callData.equals("MY_BOOKINGS")) {
                     showMyBookings(chatId);
                 }
+
+                else if (callData.equals("ADMIN_TODAY")) {
+                    showAdminBookings(chatId, LocalDate.now());
+                }
+                else if (callData.equals("ADMIN_TOMORROW")) {
+                    showAdminBookings(chatId, LocalDate.now().plusDays(1));
+                }
+
+                else if (callData.equals("ADMIN_ALL")) {
+                    showAllAdminBookings(chatId);
+                }
+
                 else if (callData.startsWith("CANCEL_")) {
                     Long bookingId = Long.parseLong(callData.replace("CANCEL_", ""));
                     long messageId = update.getCallbackQuery().getMessage().getMessageId();
@@ -363,5 +382,98 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
 
             sendStartMenu(chatId);
         }
+    }
+
+    private void showAdminMenu(long chatId) {
+        // Проверяем, что команду пишет владелец (твой ID или ID Насти)
+        long myId = 8355624591L; // Твой ID
+        long nastyaId = 123456789L; // Сюда потом впишешь ID Насти
+
+        if (chatId != myId && chatId != nastyaId) {
+            // Если пишет обычный клиент — посылаем его
+            SendMessage msg = SendMessage.builder()
+                    .chatId(chatId)
+                    .text("У вас нет доступа к этой команде.")
+                    .build();
+            execute(msg);
+            return;
+        }
+
+        // Если владелец — показываем кнопки
+        InlineKeyboardRow row1 = new InlineKeyboardRow();
+        row1.add(InlineKeyboardButton.builder().text("📅 Записи на сегодня").callbackData("ADMIN_TODAY").build());
+
+        InlineKeyboardRow row2 = new InlineKeyboardRow();
+        row2.add(InlineKeyboardButton.builder().text("📅 Записи на завтра").callbackData("ADMIN_TOMORROW").build());
+
+        InlineKeyboardRow row3 = new InlineKeyboardRow();
+        row3.add(InlineKeyboardButton.builder().text("📋 Все записи").callbackData("ADMIN_ALL").build());
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text("👑 Админ-панель. Выберите действие:")
+                .replyMarkup(new InlineKeyboardMarkup(List.of(row1, row2, row3)))
+                .build();
+        execute(message);
+    }
+
+    private void showAdminBookings(long chatId, LocalDate date) {
+        LocalDateTime startOfDay = date.atStartOfDay();
+        LocalDateTime endOfDay = date.atTime(23, 59);
+
+        List<BookingEntity> bookings = bookingRepository.findByStartTimeBetween(startOfDay, endOfDay);
+
+        if (bookings.isEmpty()) {
+            SendMessage msg = SendMessage.builder()
+                    .chatId(chatId)
+                    .text("На " + date + " записей нет.")
+                    .build();
+            execute(msg);
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder("📅 Записи на " + date + ":\n\n");
+        for (BookingEntity b : bookings) {
+            String time = String.format("%02d:%02d", b.getStartTime().getHour(), b.getStartTime().getMinute());
+            sb.append("🕒 ").append(time).append(" — ").append(b.getClientName())
+                    .append(" (📞 ").append(b.getClientPhone()).append(")\n");
+        }
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text(sb.toString())
+                .build();
+        execute(message);
+    }
+
+    private void showAllAdminBookings(long chatId) {
+        // Достаем все записи из базы (сортируем по времени)
+        List<BookingEntity> bookings = bookingRepository.findAll(
+                org.springframework.data.domain.Sort.by("startTime")
+        );
+
+        if (bookings.isEmpty()) {
+            SendMessage msg = SendMessage.builder()
+                    .chatId(chatId)
+                    .text("В базе пока нет ни одной записи.")
+                    .build();
+            execute(msg);
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder("📋 ВСЕ ЗАПИСИ:\n\n");
+        for (BookingEntity b : bookings) {
+            // Красиво форматируем дату и время
+            String dateTime = b.getStartTime().toString().replace("T", " ");
+            sb.append("🕒 ").append(dateTime)
+                    .append(" — ").append(b.getClientName())
+                    .append(" (📞 ").append(b.getClientPhone()).append(")\n");
+        }
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text(sb.toString())
+                .build();
+        execute(message);
     }
 }
