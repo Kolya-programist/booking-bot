@@ -251,7 +251,7 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
         // Просим имя
         SendMessage message = SendMessage.builder()
                 .chatId(chatId)
-                .text("Как вас зовут? (Напишите ответным сообщением)")
+                .text("Укажите ФИО? (Напишите ответным сообщением)")
                 .build();
         execute(message);
     }
