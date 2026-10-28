@@ -8,4 +8,5 @@ import java.util.List;
 public interface BookingRepository extends JpaRepository<BookingEntity, Long> {
     // Ищем записи на конкретный день, чтобы понять, какие слоты заняты
     List<BookingEntity> findByStartTimeBetween(LocalDateTime start, LocalDateTime end);
+    List<BookingEntity> findByTelegramUserId(Long telegramUserId);
 }
