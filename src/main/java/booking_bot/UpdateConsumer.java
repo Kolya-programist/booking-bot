@@ -26,6 +26,9 @@ import java.util.List;
 @Component
 public class UpdateConsumer implements LongPollingUpdateConsumer {
 
+    // Карта, которая запоминает, на каком шаге находится клиент: chatId -> (услуга, время)
+    private final java.util.Map<Long, Object[]> waitingForData = new java.util.concurrent.ConcurrentHashMap<>();
+
     private final TelegramClient telegramClient;
     private final ServiceRepository serviceRepository; // Подключаем базу
     private final BookingRepository bookingRepository;
@@ -43,7 +46,15 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                 String text = update.getMessage().getText();
                 long chatId = update.getMessage().getChatId();
 
+                // Если клиент в процессе записи (пишет имя или телефон)
+                if (waitingForData.containsKey(chatId)) {
+                    handleNameAndPhone(chatId, text);
+                    return; // Останавливаем дальнейшую обработку
+                }
+
                 if (text.equals("/start")) {
+                    long messageId = update.getMessage().getMessageId();
+                    deleteMessage(chatId, (int) messageId); // удаляем сообщение с командой /start
                     sendStartMenu(chatId);
                 }
             }
@@ -85,7 +96,8 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                 }
                 else if (callData.startsWith("CANCEL_")) {
                     Long bookingId = Long.parseLong(callData.replace("CANCEL_", ""));
-                    cancelBooking(chatId, bookingId);
+                    long messageId = update.getCallbackQuery().getMessage().getMessageId();
+                    cancelBooking(chatId, bookingId, (int) messageId);
                 }
             }
         }
@@ -166,43 +178,51 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
 
     private void showTimes(long chatId, Long serviceId, LocalDate date, int messageId) {
         deleteMessage(chatId, messageId);
-        // 1. Получаем все записи на этот день из базы
+
+        // 1. Получаем услугу, чтобы узнать её длительность
+        ServiceEntity service = serviceRepository.findById(serviceId).orElse(null);
+        if (service == null) return;
+        int duration = service.getDurationMinutes();
+
+        // 2. Получаем все записи на этот день
         LocalDateTime startOfDay = date.atStartOfDay();
         LocalDateTime endOfDay = date.atTime(23, 59);
         List<BookingEntity> bookings = bookingRepository.findByStartTimeBetween(startOfDay, endOfDay);
 
-        // 2. Генерируем сетку времени с 10:00 до 20:00 с шагом 30 минут
         List<InlineKeyboardRow> rows = new ArrayList<>();
         LocalDateTime current = date.atTime(10, 0);
         LocalDateTime end = date.atTime(20, 0);
 
         while (current.isBefore(end)) {
-            LocalDateTime slotTime = current;
+            LocalDateTime slotStart = current;
+            LocalDateTime slotEnd = slotStart.plusMinutes(duration); // Конец нового слота
 
-            // 3. Проверяем, занято ли это время
             boolean isBusy = false;
             for (BookingEntity b : bookings) {
-                // Если запись начинается в этот же момент или перекрывает его
-                if (b.getStartTime().equals(slotTime)) {
+                // Для старых записей нам тоже нужна длительность их услуги
+                ServiceEntity oldService = serviceRepository.findById(b.getServiceId()).orElse(null);
+                int oldDuration = (oldService != null) ? oldService.getDurationMinutes() : 30;
+
+                LocalDateTime bookingStart = b.getStartTime();
+                LocalDateTime bookingEnd = bookingStart.plusMinutes(oldDuration);
+
+                // Проверка пересечения отрезков времени
+                if (slotStart.isBefore(bookingEnd) && slotEnd.isAfter(bookingStart)) {
                     isBusy = true;
                     break;
                 }
             }
 
-            // 4. Если время свободно — добавляем кнопку
             if (!isBusy) {
                 InlineKeyboardRow row = new InlineKeyboardRow();
-                // Форматируем время красиво (например, 10:00)
-                String timeStr = String.format("%02d:%02d", slotTime.getHour(), slotTime.getMinute());
-
+                String timeStr = String.format("%02d:%02d", slotStart.getHour(), slotStart.getMinute());
                 row.add(InlineKeyboardButton.builder()
                         .text(timeStr)
-                        .callbackData("BOOK_" + serviceId + "_" + slotTime.toString())
+                        .callbackData("BOOK_" + serviceId + "_" + slotStart.toString())
                         .build());
                 rows.add(row);
             }
-
-            current = current.plusMinutes(30); // шаг 30 минут
+            current = current.plusMinutes(10);
         }
 
         if (rows.isEmpty()) {
@@ -222,52 +242,18 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
     }
 
     private void bookTime(long chatId, Long serviceId, LocalDateTime startTime, Integer messageId) {
-        // 1. Проверяем, не занято ли это время (защита от двойного клика)
-        LocalDateTime endTime = startTime.plusMinutes(1); // проверяем ровно эту минуту
-        List<BookingEntity> existing = bookingRepository.findByStartTimeBetween(startTime, endTime);
+        // Сохраняем выбор во временную память
+        waitingForData.put(chatId, new Object[]{serviceId, startTime});
 
-        if (!existing.isEmpty()) {
-            SendMessage errorMsg = SendMessage.builder()
-                    .chatId(chatId)
-                    .text("⚠️ Это время только что заняли. Выберите другое.")
-                    .build();
-            execute(errorMsg);
-            return;
-        }
+        // Удаляем сообщение с кнопками
+        deleteMessage(chatId, messageId);
 
-        // 2. Сохраняем запись
-        BookingEntity booking = new BookingEntity();
-        booking.setTelegramUserId(chatId);
-        booking.setServiceId(serviceId);
-        booking.setStartTime(startTime);
-        bookingRepository.save(booking);
-
-        // 3. Удаляем сообщение с кнопками (чтобы нельзя было нажать второй раз)
-        try {
-            DeleteMessage deleteMessage = DeleteMessage.builder()
-                    .chatId(chatId)
-                    .messageId(messageId) // нам нужно передать ID сообщения из update
-                    .build();
-            telegramClient.execute(deleteMessage);
-        } catch (TelegramApiException e) {
-            e.printStackTrace();
-        }
-
-        // 4. Подтверждаем клиенту
-        SendMessage toClient = SendMessage.builder()
+        // Просим имя
+        SendMessage message = SendMessage.builder()
                 .chatId(chatId)
-                .text("✅ Вы успешно записаны на " + startTime.toString().replace("T", " ") + "!")
+                .text("Как вас зовут? (Напишите ответным сообщением)")
                 .build();
-        execute(toClient);
-
-        // 5. Уведомляем владельца
-        long ownerId = 123456789L; // твой ID
-        SendMessage toOwner = SendMessage.builder()
-                .chatId(ownerId)
-                .text("🔥 НОВАЯ ЗАПИСЬ!\nКлиент ID: " + chatId + "\nУслуга ID: " + serviceId + "\nВремя: " + startTime.toString().replace("T", " "))
-                .build();
-        execute(toOwner);
-        sendStartMenu(chatId);
+        execute(message);
     }
 
     // Показать записи клиента
@@ -300,22 +286,18 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
     }
 
     // Отмена записи
-    private void cancelBooking(long chatId, Long bookingId) {
+    private void cancelBooking(long chatId, Long bookingId, int messageId) {
+        deleteMessage(chatId, messageId);
 
         if (bookingRepository.existsById(bookingId)) {
             bookingRepository.deleteById(bookingId);
 
             SendMessage message = SendMessage.builder()
                     .chatId(chatId)
-                    .text("❌ Ваша запись успешно отменена. Время снова свободно.")
+                    .text("❌ Ваша запись успешно отменена.")
                     .build();
             execute(message);
-        } else {
-            SendMessage message = SendMessage.builder()
-                    .chatId(chatId)
-                    .text("⚠️ Эта запись уже была отменена ранее.")
-                    .build();
-            execute(message);
+            sendStartMenu(chatId);
         }
     }
 
@@ -329,6 +311,57 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
         } catch (TelegramApiException e) {
             // Если сообщение старше 48 часов, Телеграм не даст его удалить, просто игнорируем ошибку
             System.out.println("Не удалось удалить сообщение: " + e.getMessage());
+        }
+    }
+
+    private void handleNameAndPhone(long chatId, String text) {
+        Object[] data = waitingForData.get(chatId);
+        Long serviceId = (Long) data[0];
+        LocalDateTime startTime = (LocalDateTime) data[1];
+
+        // Если в массиве 2 элемента (услуга, время) — значит мы только что получили ИМЯ
+        if (data.length == 2) {
+            // Меняем массив на 3 элемента: услуга, время, имя
+            waitingForData.put(chatId, new Object[]{serviceId, startTime, text});
+
+            SendMessage msg = SendMessage.builder()
+                    .chatId(chatId)
+                    .text("Отлично, " + text + "! Теперь напишите ваш номер телефона (или нажмите /start для отмены).")
+                    .build();
+            execute(msg);
+        }
+        // Если в массиве 3 элемента — значит мы получили ТЕЛЕФОН
+        else if (data.length == 3) {
+            String name = (String) data[2];
+            String phone = text;
+
+            // Сохраняем в базу
+            BookingEntity booking = new BookingEntity();
+            booking.setTelegramUserId(chatId);
+            booking.setServiceId(serviceId);
+            booking.setStartTime(startTime);
+            booking.setClientName(name);
+            booking.setClientPhone(phone);
+            bookingRepository.save(booking);
+
+            waitingForData.remove(chatId); // Очищаем память
+
+            // Подтверждаем клиенту
+            SendMessage toClient = SendMessage.builder()
+                    .chatId(chatId)
+                    .text("✅ Вы записаны!\nИмя: " + name + "\nТелефон: " + phone + "\nВремя: " + startTime.toString().replace("T", " "))
+                    .build();
+            execute(toClient);
+
+            // Уведомляем владельца
+            long ownerId = 8355624591L; // Твой ID
+            SendMessage toOwner = SendMessage.builder()
+                    .chatId(ownerId)
+                    .text("🔥 НОВАЯ ЗАПИСЬ!\nИмя: " + name + "\nТелефон: " + phone + "\nВремя: " + startTime.toString().replace("T", " "))
+                    .build();
+            execute(toOwner);
+
+            sendStartMenu(chatId);
         }
     }
 }

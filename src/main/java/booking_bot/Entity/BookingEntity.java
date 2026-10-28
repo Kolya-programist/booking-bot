@@ -15,4 +15,6 @@ public class BookingEntity {
     private Long telegramUserId; // Кто записался
     private Long serviceId;      // На какую услугу
     private LocalDateTime startTime; // Дата и время начала
+    private String clientName;
+    private String clientPhone;
 }
