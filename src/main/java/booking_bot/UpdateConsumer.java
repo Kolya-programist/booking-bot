@@ -67,6 +67,14 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
 
                     showTimes(chatId, serviceId, date);
                 }
+
+                else if (callData.startsWith("BOOK_")) {
+                    String[] parts = callData.split("_");
+                    Long serviceId = Long.parseLong(parts[1]);
+                    LocalDateTime startTime = LocalDateTime.parse(parts[2]);
+
+                    bookTime(chatId, serviceId, startTime);
+                }
             }
         }
     }
@@ -193,5 +201,31 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                     .build();
             execute(message);
         }
+    }
+
+    private void bookTime(long chatId, Long serviceId, LocalDateTime startTime) {
+        // 1. Сохраняем запись в базу
+        BookingEntity booking = new BookingEntity();
+        booking.setTelegramUserId(chatId);
+        booking.setServiceId(serviceId);
+        booking.setStartTime(startTime);
+        bookingRepository.save(booking);
+
+        // 2. Подтверждаем клиенту
+        SendMessage toClient = SendMessage.builder()
+                .chatId(chatId)
+                .text("Вы успешно записаны на " + startTime.toString().replace("T", " ") + "!")
+                .build();
+        execute(toClient);
+
+        // 3. Отправляем уведомление ВЛАДЕЛЬЦУ (тебе)
+        // Вставь свой Telegram ID в переменную OWNER_ID ниже
+        long ownerId = 8355624591L; // <--- ЗАМЕНИ НА СВОЙ ID
+        SendMessage toOwner = SendMessage.builder()
+                .chatId(ownerId)
+                .text("🔥 НОВАЯ ЗАПИСЬ!\nКлиент ID: " + chatId + "\nУслуга ID: " + serviceId +
+                        "\nВремя: " + startTime.toString().replace("T", " "))
+                .build();
+        execute(toOwner);
     }
 }
