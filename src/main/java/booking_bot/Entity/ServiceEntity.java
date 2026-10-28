@@ -1,4 +1,4 @@
-package booking_bot;
+package booking_bot.Entity;
 
 import jakarta.persistence.*;
 import lombok.Data;

@@ -3,6 +3,8 @@
 
 package booking_bot;
 
+import booking_bot.Entity.ServiceEntity;
+import booking_bot.Repository.ServiceRepository;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
