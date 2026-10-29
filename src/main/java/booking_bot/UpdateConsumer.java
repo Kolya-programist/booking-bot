@@ -26,6 +26,12 @@ import java.util.List;
 @Component
 public class UpdateConsumer implements LongPollingUpdateConsumer {
 
+    @Value("${bot.owner.id}")
+    private long ownerId;
+
+    @Value("${bot.nastya.id}")
+    private long nastyaId;
+
     private static final java.time.ZoneId ZONE = java.time.ZoneId.of("Europe/Moscow");
 
     // Карта, которая запоминает, на каком шаге находится клиент: chatId -> (услуга, время)
@@ -54,10 +60,10 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                     if (text.equals("/start")) {
                         waitingForData.remove(chatId); // Очищаем память
                         sendStartMenu(chatId); // Показываем меню
-                        return;
+                        continue;
                     }
                     handleNameAndPhone(chatId, text);
-                    return; // Останавливаем дальнейшую обработку
+                    continue; // Останавливаем дальнейшую обработку
                 }
 
                 if (text.equals("/start")) {
@@ -70,7 +76,7 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                     long messageId = update.getMessage().getMessageId();
                     deleteMessage(chatId, (int) messageId); // Удаляем команду
                     showAdminMenu(chatId);
-                    return; // Выходим, чтобы не показывать главное меню клиента
+                    continue; // Выходим, чтобы не показывать главное меню клиента
                 }
             }
             // Обработка нажатия на кнопки
@@ -111,10 +117,10 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
                 }
 
                 else if (callData.equals("ADMIN_TODAY")) {
-                    showAdminBookings(chatId, LocalDate.now());
+                    showAdminBookings(chatId, LocalDate.now(ZONE));
                 }
                 else if (callData.equals("ADMIN_TOMORROW")) {
-                    showAdminBookings(chatId, LocalDate.now().plusDays(1));
+                    showAdminBookings(chatId, LocalDate.now(ZONE).plusDays(1));
                 }
 
                 else if (callData.equals("ADMIN_ALL")) {
@@ -396,6 +402,32 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
             booking.setStartTime(startTime);
             booking.setClientName(name);
             booking.setClientPhone(phone);
+            // ПРОВЕРКА: не заняли ли время, пока клиент вводил данные?
+            ServiceEntity service = serviceRepository.findById(serviceId).orElse(null);
+            int duration = (service != null) ? service.getDurationMinutes() : 30;
+            LocalDateTime endOfNewSlot = startTime.plusMinutes(duration);
+
+            // Ищем все записи в радиусе 2 часов от нашего времени
+            List<BookingEntity> currentBookings = bookingRepository.findByStartTimeBetween(
+                    startTime.minusHours(2), startTime.plusHours(2)
+            );
+
+            for (BookingEntity b : currentBookings) {
+                ServiceEntity oldService = serviceRepository.findById(b.getServiceId()).orElse(null);
+                int oldDuration = (oldService != null) ? oldService.getDurationMinutes() : 30;
+                LocalDateTime oldEnd = b.getStartTime().plusMinutes(oldDuration);
+
+                // Если есть пересечение — не сохраняем!
+                if (startTime.isBefore(oldEnd) && endOfNewSlot.isAfter(b.getStartTime())) {
+                    SendMessage err = SendMessage.builder()
+                            .chatId(chatId)
+                            .text("⚠️ Извините, это время только что заняли. Начните запись заново командой /start")
+                            .build();
+                    execute(err);
+                    waitingForData.remove(chatId);
+                    return; // Выходим, не сохраняем
+                }
+            }
             bookingRepository.save(booking);
 
             waitingForData.remove(chatId); // Очищаем память
@@ -403,15 +435,16 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
             // Подтверждаем клиенту
             SendMessage toClient = SendMessage.builder()
                     .chatId(chatId)
-                    .text("✅ Вы записаны!\nИмя: " + name + "\nТелефон: " + phone + "\nВремя: " + startTime.toString().replace("T", " "))
+                    .text("✅ Вы записаны!\nИмя: " + name + "\nТелефон: " + phone
+                            + "\nВремя: " + startTime.toString().replace("T", " "))
                     .build();
             execute(toClient);
 
             // Уведомляем владельца
-            long ownerId = 8355624591L; // Твой ID
             SendMessage toOwner = SendMessage.builder()
                     .chatId(ownerId)
-                    .text("🔥 НОВАЯ ЗАПИСЬ!\nИмя: " + name + "\nТелефон: " + phone + "\nВремя: " + startTime.toString().replace("T", " "))
+                    .text("🔥 НОВАЯ ЗАПИСЬ!\nИмя: " + name + "\nТелефон: " + phone
+                            + "\nВремя: " + startTime.toString().replace("T", " "))
                     .build();
             execute(toOwner);
 
@@ -421,10 +454,7 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
 
     private void showAdminMenu(long chatId) {
         // Проверяем, что команду пишет владелец (твой ID или ID Насти)
-        long myId = 8355624591L; // Твой ID
-        long nastyaId = 123456789L; // Сюда потом впишешь ID Насти
-
-        if (chatId != myId && chatId != nastyaId) {
+         if (chatId != ownerId && chatId != nastyaId) {
             // Если пишет обычный клиент — посылаем его
             SendMessage msg = SendMessage.builder()
                     .chatId(chatId)
