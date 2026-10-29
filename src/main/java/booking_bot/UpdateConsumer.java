@@ -26,6 +26,8 @@ import java.util.List;
 @Component
 public class UpdateConsumer implements LongPollingUpdateConsumer {
 
+    private static final java.time.ZoneId ZONE = java.time.ZoneId.of("Europe/Moscow");
+
     // Карта, которая запоминает, на каком шаге находится клиент: chatId -> (услуга, время)
     private final java.util.Map<Long, Object[]> waitingForData = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -48,6 +50,12 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
 
                 // Если клиент в процессе записи (пишет имя или телефон)
                 if (waitingForData.containsKey(chatId)) {
+                    // Если он передумал и написал /start — прерываем ввод
+                    if (text.equals("/start")) {
+                        waitingForData.remove(chatId); // Очищаем память
+                        sendStartMenu(chatId); // Показываем меню
+                        return;
+                    }
                     handleNameAndPhone(chatId, text);
                     return; // Останавливаем дальнейшую обработку
                 }
@@ -174,7 +182,7 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
         deleteMessage(chatId, messageId);
 
         List<InlineKeyboardRow> rows = new ArrayList<>();
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZONE);
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM (EEE)", new Locale("ru"));
 
         for (int i = 0; i < 7; i++) {
@@ -209,8 +217,11 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
         List<BookingEntity> bookings = bookingRepository.findByStartTimeBetween(startOfDay, endOfDay);
 
         List<InlineKeyboardRow> rows = new ArrayList<>();
-        LocalDateTime current = date.atTime(10, 0);
-        LocalDateTime end = date.atTime(20, 0);
+        // Если выбрана сегодняшняя дата, начинаем с текущего времени (округленного до 10 минут), иначе с 10:00
+        LocalDateTime current = date.isEqual(LocalDate.now(ZONE))
+                ? LocalDateTime.now(ZONE).withMinute(0).withSecond(0).withNano(0).plusHours(1)
+                : date.atTime(10, 0);
+        LocalDateTime end = date.atTime(21, 0);
 
         while (current.isBefore(end)) {
             LocalDateTime slotStart = current;
@@ -261,13 +272,24 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
     }
 
     private void bookTime(long chatId, Long serviceId, LocalDateTime startTime, Integer messageId) {
-        // Сохраняем выбор во временную память
+        // ПРОВЕРКА: не заняли ли это время, пока клиент думал?
+        LocalDateTime endTime = startTime.plusMinutes(1);
+        List<BookingEntity> existing = bookingRepository.findByStartTimeBetween(startTime, endTime);
+
+        if (!existing.isEmpty()) {
+            SendMessage errorMsg = SendMessage.builder()
+                    .chatId(chatId)
+                    .text("⚠️ Это время только что заняли. Выберите другое.")
+                    .build();
+            execute(errorMsg);
+            return; // Выходим, не сохраняем
+        }
+
+        // Если свободно — запоминаем выбор и просим имя
         waitingForData.put(chatId, new Object[]{serviceId, startTime});
 
-        // Удаляем сообщение с кнопками
         deleteMessage(chatId, messageId);
 
-        // Просим имя
         SendMessage message = SendMessage.builder()
                 .chatId(chatId)
                 .text("Укажите ФИО? (Напишите ответным сообщением)")
@@ -308,16 +330,29 @@ public class UpdateConsumer implements LongPollingUpdateConsumer {
     private void cancelBooking(long chatId, Long bookingId, int messageId) {
         deleteMessage(chatId, messageId);
 
-        if (bookingRepository.existsById(bookingId)) {
-            bookingRepository.deleteById(bookingId);
+        // Ищем запись по ID
+        BookingEntity booking = bookingRepository.findById(bookingId).orElse(null);
 
-            SendMessage message = SendMessage.builder()
+        // Если запись не найдена ИЛИ она принадлежит другому человеку
+        if (booking == null || !booking.getTelegramUserId().equals(chatId)) {
+            SendMessage msg = SendMessage.builder()
                     .chatId(chatId)
-                    .text("❌ Ваша запись успешно отменена.")
+                    .text("⚠️ Запись не найдена или у вас нет прав на её отмену.")
                     .build();
-            execute(message);
-            sendStartMenu(chatId);
+            execute(msg);
+            return;
         }
+
+        // Если всё ок — удаляем
+        bookingRepository.deleteById(bookingId);
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text("❌ Ваша запись успешно отменена.")
+                .build();
+        execute(message);
+
+        sendStartMenu(chatId);
     }
 
     private void deleteMessage(long chatId, int messageId) {
